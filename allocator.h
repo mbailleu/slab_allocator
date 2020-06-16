@@ -5,6 +5,7 @@
 #include <cassert>
 #include <memory>
 #include <atomic>
+#include <cstddef>
 
 namespace slab {
 
@@ -20,11 +21,11 @@ class Allocator {
 
 public:
 
-  static constexpr metaDataSize(size_t n_elements) {
+  static constexpr size_t metaDataSize(size_t n_elements) {
     return sizeof(Allocator) + n_elements * sizeof(T*);
   }
 
-  static constexpr dataSize(size_t n_elements) {
+  static constexpr size_t dataSize(size_t n_elements) {
     return sizeof(T) * n_elements;
   }
 
@@ -74,11 +75,11 @@ public:
 
     using Value_t = T;
 
-    static constexpr metaDataSize(size_t n_elements) {
+    static constexpr size_t metaDataSize(size_t n_elements) {
       return sizeof(LockLessAllocator);
     }
 
-    static constexpr dataSize(size_t n_elements) {
+    static constexpr size_t dataSize(size_t n_elements) {
       return n_elements * sizeof(Node);
     }
 
@@ -100,6 +101,61 @@ public:
         auto n = reinterpret_cast<Node *>(ptr);
         n->prev = head.load(std::memory_order_relaxed);
         while (!head.compare_exchange_weak(n->prev, n, std::memory_order_release, std::memory_order_relaxed)) {}
+    }
+};
+
+class DynamicLockLessAllocator {
+    std::byte * const start_region;
+    std::byte * const end_region;
+
+    struct Node {
+        Node * prev;
+        std::byte val[];
+    };
+
+    std::atomic<Node *>      head;
+    std::atomic<std::byte *> next;
+    static_assert(std::atomic<Node *>::is_always_lock_free);
+    static_assert(std::atomic<std::byte *>::is_always_lock_free);
+
+    size_t const element_size;
+
+public:
+
+    static constexpr size_t metaDataSize(size_t n_elements) {
+        return sizeof(DynamicLockLessAllocator);
+    }
+
+    size_t dataSize(size_t n_elements) const {
+        return n_elements * (element_size + sizeof(Node));
+    }
+
+
+
+    DynamicLockLessAllocator(std::byte * start, std::byte * end, size_t element_size) : start_region(start), end_region(end), head(nullptr), next(start), element_size([] (auto x) {
+              auto remainder = x % 8;
+              if (remainder == 0) return x;
+              return x + (8 - remainder);
+            }(element_size)) {}
+
+    inline std::byte * alloc() {
+        if (auto h = head.load(std::memory_order_relaxed); h != nullptr) {
+            while (!head.compare_exchange_weak(h, h->prev, std::memory_order_release, std::memory_order_relaxed) && h != nullptr) {}
+            if (h != nullptr) {
+                h->prev = nullptr;
+                return h->val;
+            }
+        }
+        auto * buf = next.fetch_add(sizeof(Node) + element_size, std::memory_order_relaxed);
+        auto n = reinterpret_cast<Node *>(buf);
+        n->prev = nullptr;
+        return n->val;
+    }
+
+    void dealloc(std::byte * ptr) {
+        auto n = reinterpret_cast<Node *>(ptr - offsetof(Node, val));
+        n->prev = head.load(std::memory_order_relaxed);
+        while(!head.compare_exchange_weak(n->prev, n, std::memory_order_release, std::memory_order_relaxed)) {}
     }
 };
 
