@@ -59,14 +59,14 @@ public:
 
 template<class T>
 class LockLessAllocator {
-    T * start_region;
-    T * end_region;
 
     struct Node {
       T ptr;
       Node * prev;
     };
 
+    Node const * start_region;
+    Node const * end_region;
     std::atomic<Node *> head;
     std::atomic<Node *> next;
     static_assert(std::atomic<Node *>::is_always_lock_free);
@@ -83,7 +83,7 @@ public:
       return n_elements * sizeof(Node);
     }
 
-    LockLessAllocator(T * start, T * end) : start_region(start), end_region(end), head(nullptr), next(start) {}
+    LockLessAllocator(std::byte * start, std::byte * end) : start_region(reinterpret_cast<Node *>(start)), end_region(reinterpret_cast<Node *>(end)), head(nullptr), next(reinterpret_cast<Node *>(start)) {}
 
     T * alloc() {
         if (auto h = head.load(std::memory_order_relaxed); h != nullptr) {
@@ -121,6 +121,8 @@ class DynamicLockLessAllocator {
     size_t const element_size;
 
 public:
+
+    using Value_t = std::byte;
 
     static constexpr size_t metaDataSize(size_t n_elements) {
         return sizeof(DynamicLockLessAllocator);
@@ -162,19 +164,19 @@ public:
 template<class Allocator>
 class UniquePtrWrap : public Allocator {
 public:
-    using Value_t = Allocator::Value_t;
+    using Value_t = typename Allocator::Value_t;
 
     struct Deleter {
        Allocator * base;
-       void operator(Value_t * ptr) {
+       void operator()(Value_t * ptr) {
            base->dealloc(ptr);
        }
     } d;
 
-    using Ptr_t = std::unique_ptr<Value_t *, Deleter>;
+    using Ptr_t = std::unique_ptr<Value_t, Deleter>;
 
     template<class ... Args>
-    UniquePtrWrap(Args && ... args) : Allocator(std::forward<Args>(args)...), d(this) {}
+    UniquePtrWrap(Args && ... args) : Allocator(std::forward<Args>(args)...), d({this}) {}
 
     Ptr_t alloc() {
         return {Allocator::alloc(), d};
@@ -183,6 +185,6 @@ public:
     void dealloc(Ptr_t value) {
         value.reset();
     }
-}
+};
 
 } //namespace buddy
