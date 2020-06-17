@@ -75,7 +75,7 @@ public:
 
     using Value_t = T;
 
-    static constexpr size_t metaDataSize(size_t n_elements) {
+    static constexpr size_t metaDataSize(size_t) {
       return sizeof(LockLessAllocator);
     }
 
@@ -124,7 +124,7 @@ public:
 
     using Value_t = std::byte;
 
-    static constexpr size_t metaDataSize(size_t n_elements) {
+    static constexpr size_t metaDataSize(size_t) {
         return sizeof(DynamicLockLessAllocator);
     }
 
