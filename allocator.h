@@ -61,14 +61,14 @@ public:
 
 template<class T>
 class LockLessAllocator {
-
+protected:
   struct Node {
     T ptr;
     Node * prev;
   };
 
-  Node const * start_region;
-  Node const * end_region;
+  Node * const start_region;
+  Node * const end_region;
   std::atomic<Node *> head;
   std::atomic<Node *> next;
   static_assert(std::atomic<Node *>::is_always_lock_free);
@@ -100,10 +100,14 @@ public:
       }
     }
     Node * n = next.fetch_add(1, std::memory_order_relaxed);
+    if (n >= end_region) {
+      return nullptr;
+    }
     return reinterpret_cast<T*>(n);
   }
 
   void dealloc(T * ptr) {
+    if (ptr == nullptr) return;
     auto n = reinterpret_cast<Node *>(ptr);
     n->prev = head.load(std::memory_order_relaxed);
     while (!head.compare_exchange_weak(n->prev, n, std::memory_order_release, std::memory_order_relaxed)) {}
@@ -114,6 +118,7 @@ public:
 };
 
 class DynamicLockLessAllocator {
+protected:
   std::byte * const start_region;
   std::byte * const end_region;
 
@@ -163,12 +168,16 @@ public:
       }
     }
     auto * buf = next.fetch_add(sizeof(Node) + element_size, std::memory_order_relaxed);
+    if (buf >= end_region) {
+      return nullptr;
+    }
     auto n = reinterpret_cast<Node *>(buf);
     n->prev = nullptr;
     return n->val;
   }
 
   void dealloc(std::byte * ptr) {
+    if (ptr == nullptr) return;
     auto n = reinterpret_cast<Node *>(ptr - offsetof(Node, val));
     n->prev = head.load(std::memory_order_relaxed);
     while(!head.compare_exchange_weak(n->prev, n, std::memory_order_release, std::memory_order_relaxed)) {}
