@@ -193,9 +193,14 @@ public:
   void dealloc(std::byte * ptr) {
     if (ptr == nullptr) return;
     auto n = reinterpret_cast<Node *>(ptr - offsetof(Node, val));
-    assert(DOUBLE_FREE && n->prev == nullptr); //DOUBLE FREE or corrupt
+    assert(!DOUBLE_FREE || n->prev == nullptr); //DOUBLE FREE or corrupt
+#if !SLAB_ALLOC_CHECK_DOUBLE_FREE
     n->prev = head.load(std::memory_order_relaxed);
-    while(!head.compare_exchange_weak(n->prev, n, std::memory_order_release, std::memory_order_relaxed)) {}
+    while (!head.compare_exchange_weak((n->prev), n, std::memory_order_release, std::memory_order_relaxed)) {}
+#else
+    n->prev = head.load(std::memory_order_relaxed);
+    for (auto prev = n->prev.load(std::memory_order_relaxed); !head.compare_exchange_weak(prev, n, std::memory_order_release, std::memory_order_relaxed); n->prev.store(prev, std::memory_order_relaxed));
+#endif
   }
 
   std::byte * get_region_start() const { return start_region; }
