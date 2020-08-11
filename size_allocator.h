@@ -4,23 +4,34 @@
 
 #pragma  once
 
+#include <cstddef>
 #include <set>
 #include <memory>
 #include <cassert>
+#include <atomic>
 
 #include "allocator.h"
 
 class VarAllocator {
   using Allocator = DynamicLockLessAllocator;
 
+#if ALLOCATE_STATS
+  std::atomic<size_t> max_heap = 0;
+  std::atomic<size_t> current_heap = 0;
+#endif
+
   template<class T>
   struct Deleter {
+#if !ALLOCATE_STATS
     Allocator * base;
+#else
+    VarAllocator * base;
+#endif
     void operator() (T * ptr) {
       assert(base != nullptr);
       assert(ptr != nullptr);
       ptr->~T();
-      base->dealloc(ptr);
+      base->dealloc(reinterpret_cast<std::byte *>(ptr));
     }
   };
 
@@ -34,16 +45,44 @@ class VarAllocator {
 
   template<class T, class ... Args>
   std::unique_ptr<T, Deleter<T>> alloc(Args && ... args) {
-    auto allocator = allocators.lower_bound(sizeof(T));
-    if (alloctor == allocators.end()) {
+    auto it = allocators.lower_bound(sizeof(T));
+    if (it == allocators.end()) {
       return {nullptr, nullptr};
     }
-    auto * buf = allocator->alloc();
+    auto & allocator = (*it).second;
+    auto * buf = allocator.alloc();
     if (buf == nullptr) {
-      return {nullptr, &(*allocator)};
+#if !ALLOCATE_STATS
+      return {nullptr, &allocator};
+#else
+      return {nullptr, this}
+#endif
     }
+#if ALLOCATE_STATS
+    auto current_heap = this->current_heap.fetch_add(allocator.element_size, std::memory_order_relaxed);
+    current_heap += allocator.element_size;
+    auto max = max_heap.load(std::memory_order_relaxed);
+    while (max < current_heap && !max_heap.compare_exchange_weak(max, current_heap, std::memory_order_release, std::memory_order_relaxed)) {}
+#endif
     T * res = new (buf) T(std::forward<Args>(args)...);
-    return {res, &(*allocator)};
+#if !ALLOCATE_STATS
+    return {res, &allocator};
+#else
+    return {res, this};
+#endif
+  }
+
+  template<class T>
+  void dealloc(T * value) {
+    auto allocator = allocators.lower_bound(sizeof(T));
+    if (it == allocators.end()) {
+      assert(false); //This should never happen
+    }
+    auto & allocator = (*it).second;
+    allocator.dealloc(reinterpret_cast<std::byte *>(value));
+#if ALLOCATE_STATS
+    current_heap.fetch_add(-allocator.element_size, std::memory_order_relaxed);
+#endif
   }
 
   template<class T>
