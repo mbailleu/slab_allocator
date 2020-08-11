@@ -117,13 +117,23 @@ public:
   T * get_region_end() const { return end_region; }
 };
 
+#if defined(SLAB_ALLOC_CHECK_DOUBLE_FREE)
+constexpr auto DOUBLE_FREE = SLAB_ALLOC_CHECK_DOUBLE_FREE;
+#else
+constexpr auto DOUBLE_FREE = 0;
+#endif
+
 class DynamicLockLessAllocator {
 protected:
   std::byte * const start_region;
   std::byte * const end_region;
 
   struct Node {
+#if !SLAB_ALLOC_CHECK_DOUBLE_FREE
     Node * prev;
+#else
+    std::atomic<Node *> prev;
+#endif
     std::byte val[];
   };
 
@@ -132,6 +142,7 @@ protected:
   static_assert(std::atomic<Node *>::is_always_lock_free);
   static_assert(std::atomic<std::byte *>::is_always_lock_free);
 
+public:
   size_t const element_size;
 
 public:
@@ -142,11 +153,14 @@ public:
     return sizeof(DynamicLockLessAllocator);
   }
 
-  size_t dataSize(size_t n_elements) const {
+  static constexpr size_t dataSize(size_t n_elements, size_t element_size) noexcept {
     return n_elements * (element_size + sizeof(Node));
   }
 
 
+  size_t dataSize(size_t n_elements) const {
+    return dataSize(n_elements, element_size);
+  }
 
   DynamicLockLessAllocator(std::byte * start, std::byte * end, size_t element_size)
     : start_region(start)
@@ -179,6 +193,7 @@ public:
   void dealloc(std::byte * ptr) {
     if (ptr == nullptr) return;
     auto n = reinterpret_cast<Node *>(ptr - offsetof(Node, val));
+    assert(DOUBLE_FREE && n->prev == nullptr); //DOUBLE FREE or corrupt
     n->prev = head.load(std::memory_order_relaxed);
     while(!head.compare_exchange_weak(n->prev, n, std::memory_order_release, std::memory_order_relaxed)) {}
   }
