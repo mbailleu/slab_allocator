@@ -4,83 +4,63 @@
 
 #pragma  once
 
+#include "allocator.h"
+
 #include <cstddef>
-#include <map>
 #include <memory>
 #include <cassert>
 #include <atomic>
 #include <iostream>
+#include <map>
 
-#include "allocator.h"
 
 namespace slab {
 
+#if 1
 class VarAllocator {
 public:
   using Allocator = DynamicLockLessAllocator;
 
-#if ALLOCATE_STATS
-  std::atomic<size_t> max_heap = 0;
-  std::atomic<size_t> current_heap = 0;
-  VarAllocator(VarAllocator const & other) : max_heap(other.max_heap.load()), current_heap(other.current_heap.load()), allocators(allocators) {}
-  ~VarAllocator() {
-    std::cout << "Max heap usage: " << max_heap.load() << '\n';
-  }
-#endif
-
   template<class T>
   struct Deleter {
-#if !ALLOCATE_STATS
-    using Base = Allocator;
-#else
     using Base = VarAllocator;
-#endif
     Base * base;
     Deleter(Base * base) : base(base) {}
-    void operator() (T * ptr) {
+    void operator() (std::remove_extent_t<T> * ptr) {
       assert(base != nullptr);
       assert(ptr != nullptr);
-      ptr->~T();
+      using element_t = std::remove_extent_t<T>;
+      ptr->~element_t();
       base->dealloc(reinterpret_cast<std::byte *>(ptr));
     }
   };
 
-  std::map<size_t, Allocator*> allocators;
+  std::map<size_t, std::unique_ptr<Allocator>> allocators;
 
   VarAllocator() = default;
 
-  void add(Allocator * allocator) {
-    allocators.insert({allocator->element_size, allocator});
+  void add(std::unique_ptr<Allocator> allocator) {
+    allocators.insert({allocator->element_size, std::move(allocator)});
+  }
+
+  void * alloc(std::size_t size) noexcept {
+    auto it = allocators.lower_bound(size);
+    if (it == allocators.end()) {
+      return nullptr;
+    }
+    auto & allocator = (*it).second;
+    auto * buf = allocator->alloc();
+    if (buf == nullptr) {
+      return nullptr;
+    }
+    return buf;
   }
 
   template<class T, class ... Args>
-  std::unique_ptr<T, Deleter<T>> alloc(Args && ... args) {
-    auto it = allocators.lower_bound(sizeof(T));
-    if (it == allocators.end()) {
-      return {nullptr, nullptr};
-    }
-    auto allocator = (*it).second;
-    auto * buf = allocator->alloc();
-    if (buf == nullptr) {
-#if !ALLOCATE_STATS
-      return {nullptr, allocator};
-#else
-      return {nullptr, this};
-#endif
-    }
-#if ALLOCATE_STATS
-    //Not perfect since the allocation and the stats are not synced, however should be fine mostly
-    auto current_heap = this->current_heap.fetch_add(allocator->element_size, std::memory_order_relaxed);
-    current_heap += allocator->element_size;
-    auto max = max_heap.load(std::memory_order_relaxed);
-    while (max < current_heap && !max_heap.compare_exchange_weak(max, current_heap, std::memory_order_release, std::memory_order_relaxed)) {}
-#endif
+  std::unique_ptr<T, Deleter<T>> create(Args && ... args) {
+    auto buf = alloc(sizeof(T));
     T * res = new (buf) T(std::forward<Args>(args)...);
-#if !ALLOCATE_STATS
-    return {res, allocator};
-#else
     return {res, this};
-#endif
   }
 
   template<class T>
@@ -89,11 +69,8 @@ public:
     if (it == allocators.end()) {
       assert(false); //This should never happen
     }
-    auto allocator = (*it).second;
+    auto & allocator = (*it).second;
     allocator->dealloc(reinterpret_cast<std::byte *>(value));
-#if ALLOCATE_STATS
-    current_heap.fetch_add(-1*(allocator->element_size), std::memory_order_relaxed);
-#endif
   }
 
   template<class T>
@@ -102,7 +79,8 @@ public:
   }
 };
 
-VarAllocator createVarAllocator() {
+#if 0
+static VarAllocator createVarAllocator() {
   VarAllocator res;
   for (auto size : {8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384}) {
     auto buf_size = VarAllocator::Allocator::dataSize(10000, size);
@@ -113,8 +91,10 @@ VarAllocator createVarAllocator() {
   return res;
 }
 
-void destroyAllocator(VarAllocator & allocator) {
-  //TODO
+static void destroyAllocator(VarAllocator & allocator) {
+  (void) allocator;
 }
+#endif
 
+#endif
 } //namespace slab
